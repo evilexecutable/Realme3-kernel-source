@@ -26,7 +26,7 @@
 #include <linux/wakelock.h>
 #include <linux/spinlock.h>
 #include <mt-plat/mtk_battery.h>
-#include <mtk_gauge_time_service.h>
+#include <../misc/mtk_gauge_time_service.h>
 
 /* PD */
 #include <tcpm.h>
