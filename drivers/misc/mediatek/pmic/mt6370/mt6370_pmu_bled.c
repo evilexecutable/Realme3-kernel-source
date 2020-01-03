@@ -44,6 +44,54 @@ static uint8_t bled_init_data[] = {
 	0x00, /* MT6370_PMU_REG_BLAVG */
 };
 
+struct mt6370_pmu_bled_data *g_bled_data = NULL;
+struct mt6370_pmu_bled_platdata *g_pdata = NULL;
+
+uint32_t mt6370_max_bled_brightness_get(void)
+{
+	if (g_pdata == NULL) {
+		pr_err("g_pdata is null");
+		return 0;
+	}
+
+	return g_pdata->max_bled_brightness;
+}
+EXPORT_SYMBOL(mt6370_max_bled_brightness_get);
+
+int mt6370_max_bled_brightness_set(uint32_t fs_curr)
+{
+	uint32_t bright = 0;
+	int ret = 0;
+
+	if (g_pdata == NULL) {
+		pr_err("g_pdata is null");
+		return 0;
+	}
+	g_pdata->max_bled_brightness = fs_curr;
+
+	bright = ( fs_curr * 255) >> 8;
+	ret = mt6370_pmu_reg_update_bits(g_bled_data->chip, MT6370_PMU_REG_BLDIM2,
+					 MT6370_DIM2_MASK, bright & 0x7);
+	if (ret < 0)
+		goto out_bright_set;
+	ret = mt6370_pmu_reg_write(g_bled_data->chip, MT6370_PMU_REG_BLDIM1,
+				   (bright >> 3) & MT6370_DIM_MASK);
+	if (ret < 0)
+		goto out_bright_set;
+	/* if choose external enable pin, no effect even config this bit */
+	ret = mt6370_pmu_reg_update_bits(g_bled_data->chip, MT6370_PMU_REG_BLEN,
+					 MT6370_BLED_EN,
+					 MT6370_BLED_EN);
+	if (ret < 0)
+		goto out_bright_set;
+	return 0;
+
+out_bright_set:
+	pr_err("%s error %d\n", __func__, ret);
+	return ret;
+}
+EXPORT_SYMBOL(mt6370_max_bled_brightness_set);
+
 static int mt6370_bled_fled_set_mode(struct rt_fled_dev *fled_dev,
 	enum flashlight_mode mode)
 {
@@ -323,6 +371,7 @@ static irqreturn_t mt6370_pmu_bled_ocp_irq_handler(int irq, void *data)
 	struct mt6370_pmu_bled_data *bled_data = data;
 
 	dev_notice(bled_data->dev, "%s\n", __func__);
+	printk("BBox::UEC;1::3\n"); //PDA: Add BBox, LED Current OCP=(1:3)
 	return IRQ_HANDLED;
 }
 
@@ -331,6 +380,7 @@ static irqreturn_t mt6370_pmu_bled_ovp_irq_handler(int irq, void *data)
 	struct mt6370_pmu_bled_data *bled_data = data;
 
 	dev_notice(bled_data->dev, "%s\n", __func__);
+	printk("BBox::UEC;%d::%d\n", 1, 2); //PDA:i Add BBox, LED Voltage OVP=(1:2)
 	return IRQ_HANDLED;
 }
 
@@ -391,11 +441,6 @@ static inline int mt6370_pmu_bled_parse_initdata(
 	bled_init_data[2] |= (pdata->use_pwm << MT6370_BLED_PWMSHIFT);
 	bled_init_data[2] |= (pdata->pwm_fsample << MT6370_BLED_PWMFSHFT);
 	bled_init_data[2] |= (pdata->pwm_deglitch << MT6370_BLED_PWMDSHFT);
-#ifdef ODM_HQ_EDIT
-/* liyan@ODM.HQ.Multimedia.LCM	bugID 1640932 add mtk patch 2018/12/05 */
-	bled_init_data[2] |= (pdata->pwm_hys_en << MT6370_BLED_PWMHESHFT);
-	bled_init_data[2] |= (pdata->pwm_hys << MT6370_BLED_PWMHSHFT);
-#endif /* ODM_HQ_EDIT */
 	bled_init_data[3] |= (pdata->bled_ramptime << MT6370_BLED_RAMPTSHFT);
 	bright = (bright * 255) >> 8;
 	bled_init_data[4] |= (bright & 0x7);
@@ -439,17 +484,6 @@ static inline int mt_parse_dt(struct device *dev)
 		pdata->pwm_deglitch = 0x1;
 	else
 		pdata->pwm_deglitch = tmp;
-#ifdef ODM_HQ_EDIT
-/* liyan@ODM.HQ.Multimedia.LCM  bugID 1640932 add mtk patch 2018/12/05 */
-	if (of_property_read_u32(np, "mt,pwm_hys_en", &tmp) < 0)
-		pdata->pwm_hys_en = 0x1;
-	else
-		pdata->pwm_hys_en = tmp;
-	if (of_property_read_u32(np, "mt,pwm_hys", &tmp) < 0)
-		pdata->pwm_hys = 0x0;	/* 1 bit */
-	else
-		pdata->pwm_hys = tmp;
-#endif /* ODM_HQ_EDIT */
 	if (of_property_read_u32(np, "mt,pwm_avg_cycle", &tmp) < 0)
 		pdata->pwm_avg_cycle = 0;
 	else
@@ -536,6 +570,8 @@ static int mt6370_pmu_bled_probe(struct platform_device *pdev)
 	}
 
 	mt6370_pmu_bled_irq_register(pdev);
+	g_pdata = pdata;
+	g_bled_data = bled_data;
 	dev_info(&pdev->dev, "%s successfully\n", __func__);
 	return 0;
 out_mt_flash_register:

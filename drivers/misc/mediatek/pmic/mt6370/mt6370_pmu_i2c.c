@@ -21,6 +21,9 @@
 
 #include "inc/mt6370_pmu.h"
 
+#define CHARGER_READ_ERROR	do {printk("BBox;%s: charger read failed\n", __func__); printk("BBox::UEC;11::3\n");} while (0)
+#define CHARGER_WRITE_ERROR	do {printk("BBox;%s: charger write failed\n", __func__); printk("BBox::UEC;11::4\n");} while (0)
+
 static bool dbg_log_en; /* module param to enable/disable debug log */
 module_param(dbg_log_en, bool, S_IRUGO | S_IWUSR);
 
@@ -50,6 +53,8 @@ int mt6370_pmu_reg_read(struct mt6370_pmu_chip *chip, u8 addr)
 	rt_mutex_lock(&chip->io_lock);
 	ret = rt_regmap_reg_read(chip->rd, &rrd, addr);
 	rt_mutex_unlock(&chip->io_lock);
+	if(ret < 0)
+		CHARGER_READ_ERROR;
 	return (ret < 0 ? ret : rrd.rt_data.data_u32);
 #else
 	u8 data = 0;
@@ -75,6 +80,8 @@ int mt6370_pmu_reg_write(struct mt6370_pmu_chip *chip, u8 addr, u8 data)
 	rt_mutex_lock(&chip->io_lock);
 	ret = rt_regmap_reg_write(chip->rd, &rrd, addr, data);
 	rt_mutex_unlock(&chip->io_lock);
+	if(ret < 0)
+		CHARGER_WRITE_ERROR;
 	return ret;
 #else
 	int ret = 0;
@@ -102,6 +109,8 @@ int mt6370_pmu_reg_update_bits(struct mt6370_pmu_chip *chip, u8 addr,
 	rt_mutex_lock(&chip->io_lock);
 	ret = rt_regmap_update_bits(chip->rd, &rrd, addr, mask, data);
 	rt_mutex_unlock(&chip->io_lock);
+	if(ret < 0)
+		CHARGER_WRITE_ERROR;
 	return ret;
 #else
 	u8 orig = 0;
@@ -135,6 +144,8 @@ int mt6370_pmu_reg_block_read(struct mt6370_pmu_chip *chip, u8 addr,
 	rt_mutex_lock(&chip->io_lock);
 	ret = rt_regmap_block_read(chip->rd, addr, len, dest);
 	rt_mutex_unlock(&chip->io_lock);
+	if(ret < 0)
+		CHARGER_READ_ERROR;
 	return ret;
 #else
 	int ret = 0;
@@ -160,6 +171,8 @@ int mt6370_pmu_reg_block_write(struct mt6370_pmu_chip *chip, u8 addr,
 	rt_mutex_lock(&chip->io_lock);
 	ret = rt_regmap_block_write(chip->rd, addr, len, src);
 	rt_mutex_unlock(&chip->io_lock);
+	if(ret < 0)
+		CHARGER_WRITE_ERROR;
 	return ret;
 #else
 	int ret = 0;

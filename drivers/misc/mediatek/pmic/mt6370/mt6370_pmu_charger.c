@@ -33,28 +33,12 @@
 #include <mt-plat/mtk_boot.h>
 #include <mtk_charger_intf.h>
 #include <mtk_pe20_intf.h>
-// add by weijun
-#include <oppo_charger.h>
 
 #include "inc/mt6370_pmu_fled.h"
 #include "inc/mt6370_pmu_charger.h"
 #include "inc/mt6370_pmu.h"
 
-#define MT6370_PMU_CHARGER_DRV_VERSION	"1.1.23_MTK"
-
-#ifdef VENDOR_EDIT
-/*Jun.Wei@RM.BSP.CHG.Basic, 2018/10/15, Porting mt6370 driver for oppo charging core */
-extern int charger_ic_flag;
-extern int mt_power_supply_type_check(void);
-extern bool pmic_chrdet_status(void);
-extern int oppo_battery_meter_get_battery_voltage(void);
-extern int mt_get_chargerid_volt (void);
-extern void mt_set_chargerid_switch_val(int value);
-extern int mt_get_chargerid_switch_val(void);
-extern int oppo_get_rtc_ui_soc(void);
-extern int oppo_set_rtc_ui_soc(int value);
-struct mt6370_pmu_charger_data *chip_chg_data;
-#endif
+#define MT6370_PMU_CHARGER_DRV_VERSION	"1.1.24_MTK"
 
 static bool dbg_log_en;
 module_param(dbg_log_en, bool, 0644);
@@ -98,6 +82,7 @@ struct mt6370_pmu_charger_desc {
 	u32 cv;
 	u32 ieoc;
 	u32 safety_timer;
+	u32 fih_recharge_v;
 	u32 ircmp_resistor;
 	u32 ircmp_vclamp;
 	u32 dc_wdt;
@@ -127,7 +112,7 @@ struct mt6370_pmu_charger_data {
 	struct device *dev;
 	struct power_supply *psy;
 	wait_queue_head_t wait_queue;
-	enum charger_type chg_type;
+	CHARGER_TYPE chg_type;
 	bool pwr_rdy;
 	u8 irq_flag[MT6370_CHG_IRQIDX_MAX];
 	int aicr_limit;
@@ -157,6 +142,7 @@ static struct mt6370_pmu_charger_desc mt6370_default_chg_desc = {
 	.cv = 4350000,			/* uA */
 	.ieoc = 250000,			/* uA */
 	.safety_timer = 12,		/* hour */
+	.fih_recharge_v = 1, 	/* 200mV */
 #ifdef CONFIG_MTK_BIF_SUPPORT
 	.ircmp_resistor = 0,		/* uohm */
 	.ircmp_vclamp = 0,		/* uV */
@@ -319,6 +305,8 @@ static const unsigned char mt6370_chg_reg_addr[] = {
 	MT6370_PMU_REG_OVPCTRLSTAT,
 };
 
+static bool fih_set_rechargeV = false;
+
 /* ===================================================================== */
 /* Internal Functions                                                    */
 /* ===================================================================== */
@@ -328,10 +316,7 @@ static int mt6370_set_ichg(struct charger_device *chg_dev, u32 uA);
 static int mt6370_get_ichg(struct charger_device *chg_dev, u32 *uA);
 static int mt6370_enable_charging(struct charger_device *chg_dev, bool en);
 #ifdef CONFIG_MT6370_PMU_CHARGER_TYPE_DETECT
-#ifndef VENDOR_EDIT
-/*Jun.Wei@RM.BSP.CHG.Basic, 2018/10/15, never get charger psy when TYPE_DETECT disable */
 static int mt6370_inform_psy_changed(struct mt6370_pmu_charger_data *chg_data);
-#endif
 #endif
 
 static inline void mt6370_chg_irq_set_flag(
@@ -532,6 +517,9 @@ static int mt6370_get_adc(struct mt6370_pmu_charger_data *chg_data,
 	s64 adc_result = 0;
 	const int max_wait_times = 6;
 
+	if (adc_sel == MT6370_ADC_TEMP_JC)
+		dev_info(chg_data->dev, "%s: Select ADC channel to TEMP_JC\n", __func__);
+
 	mutex_lock(&chg_data->adc_access_lock);
 	mt6370_enable_hidden_mode(chg_data, true);
 
@@ -567,6 +555,9 @@ static int mt6370_get_adc(struct mt6370_pmu_charger_data *chg_data,
 			goto out_unlock_all;
 		}
 	}
+
+	if (adc_sel == MT6370_ADC_TEMP_JC)
+		dev_info(chg_data->dev, "%s: Start ADC conversion\n", __func__);
 
 	/* Start ADC conversation */
 	ret = mt6370_pmu_reg_set_bit(chg_data->chip, MT6370_PMU_REG_CHGADC,
@@ -627,6 +618,9 @@ static int mt6370_get_adc(struct mt6370_pmu_charger_data *chg_data,
 				__func__, ret);
 
 	}
+
+	if (adc_sel == MT6370_ADC_TEMP_JC)
+		dev_info(chg_data->dev, "%s: wait_times = %d\n", __func__, i);
 
 	mdelay(1);
 
@@ -716,10 +710,7 @@ static int mt6370_enable_chgdet_flow(struct mt6370_pmu_charger_data *chg_data,
 		dev_notice(chg_data->dev, "force Standard USB Host in meta\n");
 		chg_data->pwr_rdy = true;
 		chg_data->chg_type = STANDARD_HOST;
-		#ifndef VENDOR_EDIT
-        /*Jun.Wei@RM.BSP.CHG.Basic, 2018/10/15, never get charger psy when TYPE_DETECT disable */
-        mt6370_inform_psy_changed(chg_data);
-		#endif
+		mt6370_inform_psy_changed(chg_data);
 		return 0;
 	}
 #endif
@@ -736,8 +727,7 @@ static int mt6370_enable_chgdet_flow(struct mt6370_pmu_charger_data *chg_data,
 				dev_info(chg_data->dev,
 					"%s: plug out, vbus = %dmV\n",
 					__func__, vbus / 1000);
-                /*Jun.Wei@RM.BSP.CHG.Basic, 2018/12/12, never return for usb detect*/
-                //return 0;
+				return 0;
 			}
 			msleep(100);
 		}
@@ -767,8 +757,6 @@ static int mt6370_enable_ilim(struct mt6370_pmu_charger_data *chg_data, bool en)
 }
 
 #ifdef CONFIG_MT6370_PMU_CHARGER_TYPE_DETECT
-#ifndef VENDOR_EDIT
-/*Jun.Wei@RM.BSP.CHG.Basic, 2018/10/15, never get charger psy when TYPE_DETECT disable */
 static int mt6370_inform_psy_changed(struct mt6370_pmu_charger_data *chg_data)
 {
 	int ret = 0;
@@ -794,7 +782,6 @@ static int mt6370_inform_psy_changed(struct mt6370_pmu_charger_data *chg_data)
 
 	return ret;
 }
-#endif
 
 static inline int mt6370_toggle_chgdet_flow(
 	struct mt6370_pmu_charger_data *chg_data)
@@ -863,7 +850,6 @@ static int __mt6370_chgdet_handler(struct mt6370_pmu_charger_data *chg_data)
 	int ret = 0;
 	bool pwr_rdy = false, inform_psy = true;
 	u8 usb_status = 0;
-    u8 dcdt = 0;
 
 	dev_info(chg_data->dev, "%s\n", __func__);
 #ifdef CONFIG_TCPC_CLASS
@@ -918,9 +904,7 @@ static int __mt6370_chgdet_handler(struct mt6370_pmu_charger_data *chg_data)
 		chg_data->chg_type = NONSTANDARD_CHARGER;
 		break;
 	case MT6370_CHG_TYPE_CDP:
-		//chg_data->chg_type = CHARGING_HOST;
-        dcdt = (ret & MT6370_MASK_DCDT) >> MT6370_SHIFT_DCDT;
-        chg_data->chg_type = dcdt ? STANDARD_CHARGER : CHARGING_HOST;
+		chg_data->chg_type = CHARGING_HOST;
 		break;
 	case MT6370_CHG_TYPE_DCP:
 		chg_data->chg_type = STANDARD_CHARGER;
@@ -930,9 +914,11 @@ static int __mt6370_chgdet_handler(struct mt6370_pmu_charger_data *chg_data)
 		break;
 	}
 
+	dev_err(chg_data->dev, "%s chg_type=%d\n", __func__, chg_data->chg_type);
+
 	/* BC12 workaround (NONSTD -> STD) */
 	if (atomic_read(&chg_data->bc12_cnt) < 3 &&
-		chg_data->chg_type == STANDARD_HOST) {
+		((chg_data->chg_type == STANDARD_HOST) ||(chg_data->chg_type == NONSTANDARD_CHARGER))) {
 		ret = mt6370_bc12_workaround(chg_data);
 		/* Workaround success, wait for next event */
 		if (ret >= 0) {
@@ -941,7 +927,6 @@ static int __mt6370_chgdet_handler(struct mt6370_pmu_charger_data *chg_data)
 		}
 		goto out;
 	}
-	dev_err(chg_data->dev, "%s: chg_type=%d\n", __func__, chg_data->chg_type);
 
 #ifdef MT6370_APPLE_SAMSUNG_TA_SUPPORT
 	ret = mt6370_detect_apple_samsung_ta(chg_data);
@@ -957,16 +942,9 @@ out:
 	ret = __mt6370_enable_chgdet_flow(chg_data, false);
 	if (ret < 0)
 		dev_err(chg_data->dev, "%s: disable chrdet fail\n", __func__);
-	
-/*Jun.Wei@RM.BSP.CHG.Basic, 2018/10/15, never get charger psy when TYPE_DETECT disable */
-#ifndef VENDOR_EDIT
+
 	if (inform_psy)
 		mt6370_inform_psy_changed(chg_data);
-#endif
-	/* Reset AICR limit */
-	chg_data->aicr_limit = -1;
-
-	oppo_chg_wake_update_work();
 
 	return ret;
 }
@@ -1064,6 +1042,18 @@ static int mt6370_is_charging_enable(struct mt6370_pmu_charger_data *chg_data,
 	bool *en)
 {
 	int ret = 0;
+
+	ret = mt6370_pmu_reg_test_bit(chg_data->chip, MT6370_PMU_REG_CHGCTRL2,
+		MT6370_SHIFT_CHG_EN, en);
+
+	return ret;
+}
+
+static int fih_mt6370_is_charging_enable(struct charger_device *chg_dev, bool *en)
+{
+	int ret = 0;
+	struct mt6370_pmu_charger_data *chg_data =
+		dev_get_drvdata(&chg_dev->dev);
 
 	ret = mt6370_pmu_reg_test_bit(chg_data->chip, MT6370_PMU_REG_CHGCTRL2,
 		MT6370_SHIFT_CHG_EN, en);
@@ -1195,7 +1185,7 @@ static int __mt6370_set_ieoc(struct mt6370_pmu_charger_data *chg_data, u32 ieoc)
 		ieoc
 	);
 
-	dev_dbg(chg_data->dev, "%s: ieoc = %d (0x%02X)\n", __func__, ieoc,
+	dev_info(chg_data->dev, "%s: ieoc = %d (0x%02X)\n", __func__, ieoc,
 		reg_ieoc);
 
 	ret = mt6370_pmu_reg_update_bits(
@@ -1512,7 +1502,7 @@ static int __mt6370_set_ichg(struct mt6370_pmu_charger_data *chg_data, u32 uA)
 	int ret = 0;
 	u8 reg_ichg = 0;
 
-	// uA = (uA < 500000) ? 500000 : uA;
+	uA = (uA < 500000) ? 500000 : uA;
 
 	if (chg_data->chip->chip_vid != 0xf0) {
 		ret = mt6370_ichg_workaround(chg_data, uA);
@@ -1701,7 +1691,6 @@ static int mt6370_enable_te(struct charger_device *chg_dev, bool en)
 		dev_get_drvdata(&chg_dev->dev);
 	return __mt6370_enable_te(chg_data, en);
 }
-
 
 static int mt6370_reset_eoc_state(struct charger_device *chg_dev)
 {
@@ -1978,7 +1967,7 @@ static int mt6370_enable_otg(struct charger_device *chg_dev, bool en)
 	mt6370_enable_hidden_mode(chg_data, true);
 
 	/* Set OTG_OC to 500mA */
-	ret = mt6370_set_otg_current_limit(chg_dev, 1100000);
+	ret = mt6370_set_otg_current_limit(chg_dev, 500000);
 	if (ret < 0) {
 		dev_err(chg_data->dev, "%s: set otg oc failed\n", __func__);
 		goto out;
@@ -2526,6 +2515,9 @@ static int mt6370_plug_out(struct charger_device *chg_dev)
 
 	dev_info(chg_data->dev, "%s\n", __func__);
 
+	/* Reset AICR limit */
+	chg_data->aicr_limit = -1;
+
 	/* Disable charger */
 	ret = mt6370_enable_charging(chg_dev, false);
 	if (ret < 0) {
@@ -2600,7 +2592,7 @@ static int mt6370_dump_register(struct charger_device *chg_dev)
 	int adc_vsys = 0, adc_vbat = 0, adc_ibat = 0, adc_ibus = 0;
 	int adc_vbus = 0;
 	enum mt6370_charging_status chg_status = MT6370_CHG_STATUS_READY;
-	u8 chg_stat = 0, chg_ctrl[2] = {0};
+	u8 chg_stat = 0, chg_ctrl[2] = {0}, chg_ctrl11 = 0;
 	struct mt6370_pmu_charger_data *chg_data =
 		dev_get_drvdata(&chg_dev->dev);
 
@@ -2618,18 +2610,18 @@ static int mt6370_dump_register(struct charger_device *chg_dev)
 	ret = mt6370_get_adc(chg_data, MT6370_ADC_VBUS_DIV5, &adc_vbus);
 
 	chg_stat = mt6370_pmu_reg_read(chg_data->chip, MT6370_PMU_REG_CHGSTAT1);
+	chg_ctrl11 = mt6370_pmu_reg_read(chg_data->chip, MT6370_PMU_REG_CHGCTRL11);
 	ret = mt6370_pmu_reg_block_read(chg_data->chip, MT6370_PMU_REG_CHGCTRL1,
 		2, chg_ctrl);
 
 	if (chg_status == MT6370_CHG_STATUS_FAULT) {
-	//if (1) {
 		for (i = 0; i < ARRAY_SIZE(mt6370_chg_reg_addr); i++) {
 			ret = mt6370_pmu_reg_read(chg_data->chip,
 				mt6370_chg_reg_addr[i]);
 			if (ret < 0)
 				return ret;
 
-			dev_info(chg_data->dev, "%s: reg[0x%02X] = 0x%02X\n",
+			dev_dbg(chg_data->dev, "%s: reg[0x%02X] = 0x%02X\n",
 				__func__, mt6370_chg_reg_addr[i], ret);
 		}
 	}
@@ -2644,8 +2636,8 @@ static int mt6370_dump_register(struct charger_device *chg_dev)
 		__func__, adc_vsys / 1000, adc_vbat / 1000,
 		adc_ibat / 1000, adc_ibus / 1000, adc_vbus / 1000);
 
-	dev_info(chg_data->dev, "%s: CHG_EN = %d, CHG_STATUS = %s, CHG_STAT = 0x%02X\n",
-		__func__, chg_en, mt6370_chg_status_name[chg_status], chg_stat);
+	dev_info(chg_data->dev, "%s: CHG_EN = %d, CHG_STATUS = %s, CHG_STAT = 0x%02X, CHG_CTRL11 = 0x%02X\n",
+		__func__, chg_en, mt6370_chg_status_name[chg_status], chg_stat, chg_ctrl11);
 
 	dev_info(chg_data->dev, "%s: CHG_CTRL1 = 0x%02X, CHG_CTRL2 = 0x%02X\n",
 		__func__, chg_ctrl[0], chg_ctrl[1]);
@@ -3228,48 +3220,14 @@ static irqreturn_t mt6370_pmu_bst_vbusovi_irq_handler(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-/*Jun.Wei@RM.BSP.CHG.Basic, 2019/01/21, MTK patch for OTG OCP irq*/
-#if 0
-bool mt6370_bst_olpi_evt(struct mt6370_pmu_chip *chip, u8 addr)
-{
-     int ret_bst_olpi =0;
-        ret_bst_olpi = mt6370_pmu_reg_read(chip, addr)&0x80;
-        return (ret_bst_olpi == 0 ?false: true);
-}
-
-void mt6370_open_otg(struct mt6370_pmu_chip *chip, u8 addr)
-{
-   int ret_bst_olpi =0;
-   ret_bst_olpi = mt6370_pmu_reg_read(chip, addr)|0x01;
-   mt6370_pmu_reg_write(chip, addr,ret_bst_olpi);
-}
-#endif
-
-void mt6370_close_otg(struct mt6370_pmu_chip *chip, u8 addr )
-{
-     int ret_bst_olpi =0;
-     ret_bst_olpi = mt6370_pmu_reg_read(chip, addr)&0xFE;
-     mt6370_pmu_reg_write(chip, addr, ret_bst_olpi);
-}
-
 static irqreturn_t mt6370_pmu_bst_olpi_irq_handler(int irq, void *data)
 {
-    static int count_olpi =0;
 	struct mt6370_pmu_charger_data *chg_data =
 		(struct mt6370_pmu_charger_data *)data;
 
-	//dev_notice(chg_data->dev, "%s\n", __func__);
-    dev_info(chg_data->dev, "%s\n", __func__);
-    count_olpi++;
-
-    dev_info(chg_data->dev, "%s: count_olpi = %d\n", __func__, count_olpi);
-    if( count_olpi >= 5){
-        count_olpi = 0;
-        mt6370_close_otg(chg_data->chip,MT6370_PMU_REG_CHGCTRL1);
-    }
+	dev_notice(chg_data->dev, "%s\n", __func__);
 	return IRQ_HANDLED;
 }
-// add end
 
 static irqreturn_t mt6370_pmu_attachi_irq_handler(int irq, void *data)
 {
@@ -3617,6 +3575,12 @@ static inline int mt_parse_dt(struct device *dev,
 		&chg_desc->safety_timer) < 0)
 		dev_err(chg_data->dev, "%s: no safety timer\n", __func__);
 
+	if (of_property_read_u32(np, "fih_recharge_v",
+		&chg_desc->fih_recharge_v) < 0)
+		dev_err(chg_data->dev, "%s: no fih_recharge_v\n", __func__);
+	else
+		fih_set_rechargeV = true;
+
 	if (of_property_read_u32(np, "dc_wdt", &chg_desc->dc_wdt) < 0)
 		dev_err(chg_data->dev, "%s: no dc wdt\n", __func__);
 
@@ -3635,6 +3599,19 @@ static inline int mt_parse_dt(struct device *dev,
 	chg_data->chg_desc = chg_desc;
 
 	return 0;
+}
+
+static int fih_set_re_charge_voltage(
+	struct mt6370_pmu_charger_data *chg_data, u32 index)
+{
+	int ret = 0;
+
+	dev_info(chg_data->dev, "%s: index = %d\n", __func__, index);
+
+	ret = mt6370_pmu_reg_update_bits(
+		chg_data->chip, MT6370_PMU_REG_CHGCTRL11, 0x3, index);
+
+	return ret;
 }
 
 static int mt6370_chg_init_setting(struct mt6370_pmu_charger_data *chg_data)
@@ -3701,6 +3678,14 @@ static int mt6370_chg_init_setting(struct mt6370_pmu_charger_data *chg_data)
 	if (ret < 0)
 		dev_err(chg_data->dev, "%s: enable charger timer failed\n",
 			__func__);
+
+	if(fih_set_rechargeV)
+	{
+		ret = fih_set_re_charge_voltage(chg_data, chg_desc->fih_recharge_v);
+		if (ret < 0)
+			dev_err(chg_data->dev, "%s: set re-charge voltage failed\n",
+				__func__);
+	}
 
 	/* Initially disable WDT to prevent 1mA power consumption */
 	ret = mt6370_enable_wdt(chg_data, false);
@@ -3791,6 +3776,8 @@ static struct charger_ops mt6370_chg_ops = {
 
 	/* Event */
 	.event = mt6370_do_event,
+
+	.is_charging_enabled = fih_mt6370_is_charging_enable,
 };
 
 
@@ -3860,336 +3847,17 @@ static ssize_t shipping_mode_store(struct device *dev,
 
 static const DEVICE_ATTR_WO(shipping_mode);
 
-#ifdef VENDOR_EDIT
-/*Jun.Wei@RM.BSP.CHG.Basic, 2018/10/15, Porting mt6370 driver for oppo charging core */
-static int __mt6370_disable_iterm(struct charger_device *chg_dev, bool en)
-{
-	int ret = 0;
-	struct mt6370_pmu_charger_data *chg_data =
-		dev_get_drvdata(&chg_dev->dev);
-
-	ret = (en ? mt6370_pmu_reg_set_bit : mt6370_pmu_reg_clr_bit)
-		(chg_data->chip, MT6370_PMU_REG_CHGCTRL9, 0x08);	
-	if (ret < 0)
-		dev_err(chg_data->dev, "%s: set iterm_en fail\n", __func__);
-
-	return ret;
-}
-
-void oppo_mt6370_dump_registers(void)
-{
-	int ret = 0;
-	ret = mt6370_dump_register(chip_chg_data->chg_dev);
-//	return 0;
-}
-
-int oppo_mt6370_kick_wdt(void)
-{
-	int rc = 0;
-
-	rc = mt6370_kick_wdt(chip_chg_data->chg_dev);
-
-    return rc;
-}
-
-static int oppo_mt6370_charging_current_write_fast(int chg_cur)
-{
-	int ret = 0;
-	int charging_current = 0;
-
-	charging_current = chg_cur * 1000;
-
-	printk("%s:[OPPO_CHG] charging_current=%d\n", __func__, charging_current);
-	mt6370_set_ichg(chip_chg_data->chg_dev, charging_current);
-
-	return ret;
-}
-
-
-int oppo_mt6370_hardware_init(void)
-{
-	int rc = 0;
-
-	rc = mt6370_enable_charging(chip_chg_data->chg_dev, true);
-	//rc = mt6370_enable_power_path(chip_chg_data->chg_dev, true);
-
-	return 0;
-}
-
-static void oppo_mt6370_set_aicl_point(int vbatt)
-{
-	int vbat_aicl = 0;
-
-	vbat_aicl = vbatt * 1000;
-	mt6370_set_mivr(chip_chg_data->chg_dev, vbat_aicl);
-}
-
-static int oppo_mt6370_input_current_limit_write(int value)
-{
-	int input_current = 0;
-
-	input_current = value * 1000;
-	printk("%s:[OPPO_CHG] input_current=%d\n", __func__, input_current);
-	mt6370_set_aicr(chip_chg_data->chg_dev, input_current);
-
-	return 0;
-}
-
-int oppo_mt6370_float_voltage_write(int vfloat_mv)
-{
-	int rc = 0;
-	int cv_voltage = 0;
-
-	cv_voltage = vfloat_mv * 1000;
-
-	mt6370_set_cv(chip_chg_data->chg_dev, cv_voltage);
-
-	return rc;
-}
-
-
-static int oppo_mt6370_set_termchg_current(int term_curr)
-{
-	int rc = 0;
-	int term_current = 0;
-
-	term_current = term_curr * 1000;
-	mt6370_set_ieoc(chip_chg_data->chg_dev, term_current);
-
-	return rc;
-}
-
-int oppo_mt6370_enable_charging(void)
-{
-	int rc = 0;
-
-	rc = mt6370_enable_charging(chip_chg_data->chg_dev, true);
-	// rc = mt6370_enable_power_path(chip_chg_data->chg_dev, true);
-
-	return 0;
-}
-
-
-int oppo_mt6370_disable_charging(void)
-{
-	int rc = 0;
-	rc = mt6370_enable_charging(chip_chg_data->chg_dev, false);
-	// rc = mt6370_enable_power_path(chip_chg_data->chg_dev, false);
-
-	return 0;
-}
-
-
-static int oppo_mt6370_check_charging_enable(void)
-{
-	bool rc = 0;
-	mt6370_is_charging_enable(chip_chg_data, &rc);
-	if(rc)
-		return 1;
-	else
-		return 0;
-}
-
-int oppo_mt6370_suspend_charger(void)
-{
-	int rc = 0;
-	mt6370_enable_hz(chip_chg_data, true);
-
-	return rc;
-}
-
-int oppo_mt6370_unsuspend_charger(void)
-{
-	int rc = 0;
-	mt6370_enable_hz(chip_chg_data, false);
-
-	return rc;
-}
-
-int oppo_mt6370_set_rechg_voltage(int recharge_mv)
-{
-	int rc = 0;
-	return rc;
-}
-
-int oppo_mt6370_reset_charger(void)
-{
-	int rc = 0;
-	return rc;
-}
-
-int oppo_mt6370_registers_read_full(void)
-{
-	int rc = 0;
-	return rc;
-}
-
-int oppo_mt6370_otg_enable(void)
-{
-	int rc = 0;
-	mt6370_enable_hz(chip_chg_data, false);
-	rc = mt6370_enable_otg(chip_chg_data->chg_dev, true);
-	oppo_chg_set_otg_online(true);
-
-	return rc;
-}
-
-int oppo_mt6370_otg_disable(void)
-{
-	int rc = 0;
-	rc = mt6370_enable_otg(chip_chg_data->chg_dev, false);
-	oppo_chg_set_otg_online(false);
-
-	return rc;
-}
-
-static int oppo_mt6370_set_chging_term_disable(void)
-{
-	int rc = 0;
-
-	__mt6370_disable_iterm(chip_chg_data->chg_dev, false);
-
-	return rc;
-}
-
-
-static bool oppo_mt6370_check_charger_resume(void)
-{
-	return false;
-}
-
-static int oppo_mt6370_get_chg_current_step(void)
-{
-	return 64;
-}
-
-#ifdef CONFIG_OPPO_RTC_DET_SUPPORT
-static int rtc_reset_check(void)
-{
-	return 0;
-}
-#endif /* CONFIG_OPPO_RTC_DET_SUPPORT */
-
-#ifdef CONFIG_OPPO_SHORT_C_BATT_CHECK
-/* This function is getting the dynamic aicl result/input limited in mA.
- * If charger was suspended, it must return 0(mA).
- * It meets the requirements in SDM660 platform.
- */
-static int oppo_chg_get_dyna_aicl_result(void)
-{
-	return 0;
-	
-}
-#endif /* CONFIG_OPPO_SHORT_C_BATT_CHECK */
-
-enum charger_type oppo_mt6370_chr_type_check()
-{
-	return chip_chg_data->chg_type;
-}
-
-struct oppo_chg_operations  oppo_mt6370_chg_ops = {
-		.dump_registers = oppo_mt6370_dump_registers,
-		.kick_wdt = oppo_mt6370_kick_wdt,
-		.hardware_init = oppo_mt6370_hardware_init,
-		.charging_current_write_fast = oppo_mt6370_charging_current_write_fast,
-		.set_aicl_point = oppo_mt6370_set_aicl_point,
-		.input_current_write = oppo_mt6370_input_current_limit_write,
-		.float_voltage_write = oppo_mt6370_float_voltage_write,
-		.term_current_set = oppo_mt6370_set_termchg_current,
-		.charging_enable = oppo_mt6370_enable_charging,
-		.charging_disable = oppo_mt6370_disable_charging,
-		.get_charging_enable = oppo_mt6370_check_charging_enable,
-		.charger_suspend = oppo_mt6370_suspend_charger,
-		.charger_unsuspend = oppo_mt6370_unsuspend_charger,
-		.set_rechg_vol = oppo_mt6370_set_rechg_voltage,
-		.reset_charger = oppo_mt6370_reset_charger,
-		.read_full = oppo_mt6370_registers_read_full,
-		.otg_enable = oppo_mt6370_otg_enable,
-		.otg_disable = oppo_mt6370_otg_disable,
-		.set_charging_term_disable = oppo_mt6370_set_chging_term_disable,
-		.check_charger_resume = oppo_mt6370_check_charger_resume,
-	#ifdef CONFIG_OPPO_CHARGER_MTK
-		.get_charger_type = mt_power_supply_type_check,
-		//.get_chg_pretype = charger_pretype_get,
-		.get_charger_volt = battery_meter_get_charger_voltage,
-		.check_chrdet_status = (bool (*) (void)) pmic_chrdet_status,
-		.get_instant_vbatt = oppo_battery_meter_get_battery_voltage,
-		.get_boot_mode = (int (*)(void))get_boot_mode,
-		.get_boot_reason = (int (*)(void))get_boot_reason,
-	//	#ifdef CONFIG_MTK_HAFG_20
-		//.get_chargerid_volt = mt_get_chargerid_volt,
-	
-		//.set_chargerid_switch_val = mt_set_chargerid_switch_val ,
-		//.get_chargerid_switch_val  = mt_get_chargerid_switch_val,
-		//.set_usb_shell_ctrl_val = mt_set_usb_shell_ctrl_val,
-		//.get_usb_shell_ctrl_val = mt_get_usb_shell_ctrl_val,
-	//	#endif /* CONFIG_MTK_HAFG_20 */
-	#ifdef CONFIG_MTK_HAFG_20
-		.get_rtc_soc = get_rtc_spare_oppo_fg_value,
-		.set_rtc_soc = set_rtc_spare_oppo_fg_value,
-	/*Qiao.Hu@BSP.BaseDrv.CHG.Basic, 2017/11/29, add for mt6771 charger */
-	#elif defined(CONFIG_OPPO_CHARGER_MTK6771)
-		.get_rtc_soc = oppo_get_rtc_ui_soc,
-		.set_rtc_soc = oppo_set_rtc_ui_soc,
-	#elif defined(CONFIG_OPPO_CHARGER_MTK6763)
-		.get_rtc_soc = get_rtc_spare_oppo_fg_value,
-		.set_rtc_soc = set_rtc_spare_oppo_fg_value,
-	#else /* CONFIG_MTK_HAFG_20 */
-		.get_rtc_soc = oppo_get_rtc_ui_soc,
-		.set_rtc_soc = set_rtc_spare_fg_value,
-	#endif /* CONFIG_MTK_HAFG_20 */
-		.set_power_off = mt_power_off,
-		.usb_connect = mt_usb_connect,
-		.usb_disconnect = mt_usb_disconnect,
-	#else /* CONFIG_OPPO_CHARGER_MTK */
-		.get_charger_type = qpnp_charger_type_get,
-		.get_charger_volt = qpnp_get_prop_charger_voltage_now,
-		.check_chrdet_status = qpnp_lbc_is_usb_chg_plugged_in,
-		.get_instant_vbatt = qpnp_get_prop_battery_voltage_now,
-		.get_boot_mode = get_boot_mode,
-		.get_rtc_soc = qpnp_get_pmic_soc_memory,
-		.set_rtc_soc = qpnp_set_pmic_soc_memory,
-	#endif /* CONFIG_OPPO_CHARGER_MTK */
-		.get_chg_current_step = oppo_mt6370_get_chg_current_step,
-#ifdef CONFIG_OPPO_SHORT_C_BATT_CHECK
-		.get_dyna_aicl_result = oppo_chg_get_dyna_aicl_result,
-#endif
-	#ifdef CONFIG_OPPO_RTC_DET_SUPPORT
-		.check_rtc_reset = rtc_reset_check,
-	#endif
-};
-#endif// add end
-
 static int mt6370_pmu_charger_probe(struct platform_device *pdev)
 {
 	int ret = 0;
 	struct mt6370_pmu_charger_data *chg_data;
 	bool use_dt = pdev->dev.of_node;
-	#ifdef VENDOR_EDIT
-	/*Jun.Wei@RM.BSP.CHG.Basic, 2018/10/15, Porting mt6370 driver for oppo charging core */
-	struct oppo_chg_chip *chip = NULL;
-	#endif// add end
 
 	pr_info("%s: (%s)\n", __func__, MT6370_PMU_CHARGER_DRV_VERSION);
 
 	chg_data = devm_kzalloc(&pdev->dev, sizeof(*chg_data), GFP_KERNEL);
 	if (!chg_data)
 		return -ENOMEM;
-
-	#ifdef VENDOR_EDIT
-	/*Jun.Wei@RM.BSP.CHG.Basic, 2018/10/15, Porting mt6370 driver for oppo charging core */
-	chip = devm_kzalloc(&pdev->dev,                                                     
-			sizeof(struct oppo_chg_chip), GFP_KERNEL); 
-	if (!chip) {                                                                          
-		chg_err(" kzalloc() failed\n");                                               
-		return -ENOMEM;                                                               
-	} 
-
-	chip->chg_ops = &oppo_mt6370_chg_ops;
-	charger_ic_flag = 3;
-	printk("%s: charger_ic_flag=%d \n", __func__, charger_ic_flag);	
-	chip_chg_data = chg_data;
-	#endif// add end
 
 	mutex_init(&chg_data->adc_access_lock);
 	mutex_init(&chg_data->irq_access_lock);
@@ -4236,8 +3904,6 @@ static int mt6370_pmu_charger_probe(struct platform_device *pdev)
 	if (!chg_data->usb_switch)
 		dev_err(chg_data->dev, "%s: get usb switch failed\n", __func__);
 
-#ifndef VENDOR_EDIT
-	/*Jun.Wei@RM.BSP.CHG.Basic, 2018/10/15, never get charger psy when TYPE_DETECT disable */
 	/* Get chg type det power supply */
 	chg_data->psy = power_supply_get_by_name("charger");
 	if (!chg_data->psy) {
@@ -4246,25 +3912,34 @@ static int mt6370_pmu_charger_probe(struct platform_device *pdev)
 		ret = -EINVAL;
 		goto err_no_psy;
 	}
-#endif
-#ifdef ODM_HQ_EDIT
-/* hanwenchao@ODM.Bsp 2018/11/02 add for long press powerkey poweroff from MTK */
-dev_err(chg_data->dev, "%s: start MT6370_PMU_REG_CHGPUMP\n", __func__);
-ret = mt6370_pmu_reg_set_bit(chg_data->chip,
-MT6370_PMU_REG_CHGPUMP, 0xE0);
-if (ret < 0) {
-dev_err(chg_data->dev, "%s: xiaoyuan sw init failed\n", __func__);
-goto err_chg_init_setting;
-}
-ret = mt6370_pmu_reg_read(chg_data->chip,MT6370_PMU_REG_CHGPUMP);
 
-if (ret < 0)
- dev_err(chg_data->dev, "%s: read reg0x2A failed\n",__func__);
-else
- dev_err(chg_data->dev, "%s: reg0x2A = 0x%02X\n",__func__, ret);
-dev_err(chg_data->dev, "%s: end MT6370_PMU_REG_CHGPUMP\n", __func__);
-#endif
 	/* Do initial setting */
+
+	dev_err(chg_data->dev, "%s: start MT6370_PMU_REG_CHGPUMP\n", __func__);
+
+	ret = mt6370_pmu_reg_set_bit(chg_data->chip,MT6370_PMU_REG_CHGPUMP, 0xE0);
+
+	if (ret < 0) {
+
+		dev_err(chg_data->dev, "%s: xiaoyuan sw init failed\n", __func__);
+
+		goto err_chg_init_setting;
+
+	}
+
+	ret = mt6370_pmu_reg_read(chg_data->chip,MT6370_PMU_REG_CHGPUMP);
+
+	if (ret < 0)
+	{
+		dev_err(chg_data->dev, "%s: read reg0x2A failed\n",__func__);
+	}
+	else
+	{
+		dev_err(chg_data->dev, "%s: reg0x2A = 0x%02X\n",__func__, ret);
+	}
+
+	dev_err(chg_data->dev, "%s: end MT6370_PMU_REG_CHGPUMP\n", __func__);
+
 	ret = mt6370_chg_init_setting(chg_data);
 	if (ret < 0) {
 		dev_err(chg_data->dev, "%s: sw init failed\n", __func__);
@@ -4322,10 +3997,7 @@ err_register_ls_dev:
 err_register_chg_dev:
 err_chg_sw_workaround:
 err_chg_init_setting:
-#ifndef VENDOR_EDIT
-/*Jun.Wei@RM.BSP.CHG.Basic, 2018/10/15, never get charger psy when TYPE_DETECT disable */
 err_no_psy:
-#endif
 	mutex_destroy(&chg_data->ichg_access_lock);
 	mutex_destroy(&chg_data->adc_access_lock);
 	mutex_destroy(&chg_data->irq_access_lock);
@@ -4391,6 +4063,9 @@ MODULE_VERSION(MT6370_PMU_CHARGER_DRV_VERSION);
 
 /*
  * Version Note
+ * 1.1.24_MTK
+ * (1) Add debug information for TEMP_JC
+ *
  * 1.1.23_MTK
  * (1) Use bc12_access_lock instead of chgdet_lock
  * (2) Add junction ADC workaround
