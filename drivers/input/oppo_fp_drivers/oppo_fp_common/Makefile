@@ -4,7 +4,7 @@ else ifeq ($(CONFIG_OPPO_FINGERPRINT_MTK),y)
 PROJECT_NAME = $(shell echo $(TARGET_PRODUCT) | sed -e 's/full_oppo.*_//g')
 endif
 
-DEFS = -DCONFIG_OPPO_FINGERPRINT_PROJCT=$(PROJECT_NAME)
+DEFS = -DCONFIG_OPPO_FINGERPRINT_PROJCT=6771
 ccflags-y += $(DEFS)
 
 ifeq ($(TARGET_PRODUCT),sdm660_64)
