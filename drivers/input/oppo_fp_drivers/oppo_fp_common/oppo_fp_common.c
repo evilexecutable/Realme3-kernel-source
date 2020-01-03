@@ -29,7 +29,7 @@
 #if CONFIG_OPPO_FINGERPRINT_PLATFORM == 6763 || CONFIG_OPPO_FINGERPRINT_PLATFORM == 6771
 #include <sec_boot_lib.h>
 #else
-#include <soc/qcom/smem.h>
+#include <linux/soc/qcom/smem.h>
 #endif
 #include <soc/oppo/oppo_project.h>
 #include <linux/slab.h>
