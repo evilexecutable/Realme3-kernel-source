@@ -236,10 +236,10 @@ int panel_serial_number_read(char cmd, uint64_t *buf, int num)
 				/*
 				* Yongpeng.Yi@PSW.MM.Display.LCD.Stability, 2018/11/13,
 				* add for lcd serial del unused params;
+				+ (panel_serial_info.reserved[0] << 8)\
+				+ (panel_serial_info.reserved[1]);
 				*/
-				//+ (panel_serial_info.reserved[0] << 8)\
-				//+ (panel_serial_info.reserved[1]);
-
+				 
 			if (panel_serial_info.year < 6) {
 				continue;
 			} else {
