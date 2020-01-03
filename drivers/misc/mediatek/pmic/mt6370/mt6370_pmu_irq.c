@@ -59,6 +59,7 @@ static const struct irq_mapping_tbl mt6370_pmu_irq_mapping_tbl[] = {
 	MT6370_PMU_IRQ_MAPPING(chg_rechgi, 37),
 	MT6370_PMU_IRQ_MAPPING(chg_termi, 38),
 	MT6370_PMU_IRQ_MAPPING(chg_ieoci, 39),
+	MT6370_PMU_IRQ_MAPPING(bst_olpi, 47),
 	MT6370_PMU_IRQ_MAPPING(attachi, 48),
 	MT6370_PMU_IRQ_MAPPING(detachi, 49),
 	MT6370_PMU_IRQ_MAPPING(qc30stpdone, 51),
@@ -227,16 +228,24 @@ static irqreturn_t mt6370_pmu_irq_handler(int irq, void *priv)
 		goto out_irq_handler;
 	}
 	/* workaround for irq, divided irq event into upper and lower */
+	/*Jun.Wei@RM.BSP.CHG.Basic, 2019/01/21, MTK patch for OTG OCP irq*/
+	#ifndef VENDOR_EDIT
 	ret = mt6370_pmu_reg_block_read(chip, MT6370_PMU_REG_CHGIRQ1, 5, data);
 	if (ret < 0) {
-		dev_err(chip->dev, "read upper irq event fail\n");
-		goto out_irq_handler;
+	       dev_err(chip->dev, "read upper irq event fail\n");
+	       goto out_irq_handler;
 	}
 	ret = mt6370_pmu_reg_block_read(chip, MT6370_PMU_REG_QCIRQ, 10, data + 6);
 	if (ret < 0) {
-		dev_err(chip->dev, "read lower irq event fail\n");
-		goto out_irq_handler;
+	       dev_err(chip->dev, "read lower irq event fail\n");
+	       goto out_irq_handler;
 	}
+	#else
+    ret = mt6370_pmu_reg_block_read(chip, MT6370_PMU_REG_CHGIRQ1, 16, data);
+    if (ret < 0) {
+        dev_err(chip->dev, "read irq event fail\n");
+    }
+	#endif
 
 	/* read stat after reading irq evt */
 	ret = mt6370_pmu_reg_block_read(chip, MT6370_PMU_REG_CHGSTAT1, 16, stat_new);

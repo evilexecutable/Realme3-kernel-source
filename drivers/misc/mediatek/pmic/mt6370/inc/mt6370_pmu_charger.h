@@ -267,8 +267,10 @@
 
 /* ========== USBSTATUS1 0x27 ============ */
 #define MT6370_SHIFT_USB_STATUS	4
+#define MT6370_SHIFT_DCDT   2
 
 #define MT6370_MASK_USB_STATUS	0x70
+#define MT6370_MASK_DCDT    0x04
 
 /* ========== CHG_PUMP 0x2A ============ */
 #define MT6370_SHIFT_VG_LVL_SEL	1

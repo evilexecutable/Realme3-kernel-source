@@ -357,7 +357,12 @@ static inline int mt_parse_dt(struct device *dev,
 	}
 
 	if (of_property_read_u32(np, "db_vbst", &val) == 0) {
-		if (val >= 4000 && val <= 6150) {
+                //ifdef ODM_HQ_EDIT
+                /* zhitongze@ODM.HQ.Multimedia.LCM 2018/10/22 modified for boot up screen with 6V */
+		if (val >= 4000 && val <= 6200) {
+                //#else
+                //if (val >= 4000 && val <= 6150) {
+                //#endif /* ODM_HQ_EDIT */
 			mask->db_vbst.bitfield.vbst = 0x3f;
 			pdata->db_vbst.bitfield.vbst = (val - 4000) / 50;
 		}
